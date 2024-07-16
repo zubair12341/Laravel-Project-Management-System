@@ -1,0 +1,223 @@
+<?php
+
+namespace App\Http\Controllers\Manager;
+use App\Http\Controllers\Controller;
+use App\Models\Project;
+use Illuminate\Http\Request;
+use Auth;
+use App\Models\Leave;
+use App\Models\Task;
+use App\Models\User;
+use App\Models\TimeTracker;
+use App\Models\TimeBreaker;
+use DateTime;
+use DateTimeZone;
+use Timezone;
+use DB;
+use Carbon\Carbon;
+
+class ManagerDashboardController extends Controller
+{
+    public function dashboard()
+    {
+        $user = User::find(auth()->user()->id);
+        if(auth()->user()->role_id=='3')
+        {
+
+            $tasks = Project::where('lead_id', $user->id)
+                ->orderBy('created_at', 'desc')
+                ->limit(5)
+                ->get();
+        }
+        elseif(auth()->user()->role_id=='4'){
+            $tasks = Project::where('creater_id', $user->id)
+            ->orderBy('created_at', 'desc')
+            ->limit(5)
+            ->get();
+        }
+
+            $total_task_count = 0;
+            $total_pending_count = 0;
+            $total_complete_count = 0;
+            $total_progress_count = 0;
+            $total_ongoing_count = 0;
+            
+            foreach ($tasks as $project) {
+                $total_task_count += Task::where('project_id', $project->id)->count();
+                $total_pending_count += Task::where('project_id', $project->id)->where('status', 'pending')->count();
+                $total_complete_count += Task::where('project_id', $project->id)->where('status', 'completed')->count();
+                $total_progress_count += Task::where('project_id', $project->id)->where('status', 'in progress')->count();
+                $total_ongoing_count += Task::where('project_id', $project->id)->where('status', 'ongoing')->count();
+            }
+            // dd($task_counts);
+//dd($complete_task_count);
+        return view('manager_account.dashboard', compact('tasks','total_task_count','total_complete_count','total_pending_count',
+        'total_progress_count',
+        'total_ongoing_count'));
+
+       
+    }
+
+
+    public function checkInTimeStore(Request $request)
+    {
+        $employee = Auth::user()->employee;
+
+        $timeTracker = new TimeTracker;
+
+        $timeTracker->employee_id = $employee->id;
+        $timeTracker->checkin = new DateTime("now", new DateTimeZone('Asia/Karachi'));
+        $timeTracker->date = Carbon::today();
+
+        $timeTracker->save();
+
+        return redirect('/manager/dashboard')->with('success', 'CheckIn time has been submited');
+
+    }
+
+    public function breakInTimeStore(Request $request)
+    {
+        $employee = Auth::user()->employee;
+
+        $checkInId = TimeTracker::select('id')->whereNull('checkout')
+            ->where('employee_id', Auth::user()->employee->id)
+            ->whereDate('date', Carbon::today())
+            ->first();
+
+        $timeBreaker = DB::table('time_breaks')->insert([
+            'time_tracker_id' => $checkInId->id,
+            'employee_id' => $employee->id,
+            'date' => Carbon::today(),
+            'breakin' => new DateTime("now", new DateTimeZone('Asia/Karachi')),
+            'created_at' => Carbon::now(),
+            'updated_at' => Carbon::now(),
+        ]);
+
+        return redirect()->back()->with('success', 'Break time has been submited');
+    }
+
+    public function breakOutTimeUpdate(Request $request)
+    {
+        $checkInId = TimeTracker::select('id')->whereNull('checkout')
+            ->where('employee_id', Auth::user()->employee->id)
+            ->whereDate('date', Carbon::today())
+            ->first();
+
+        $timeEntry = TimeBreaker::whereNull('breakout')
+            ->where('time_tracker_id', $checkInId->id)
+            ->first();
+
+            if ($timeEntry)
+            {
+                $timeEntry->update([
+                    'breakout' =>  new DateTime("now", new DateTimeZone('Asia/Karachi')),
+                ]);
+
+                $totalTime = TimeBreaker::select('breakin', 'breakout')->whereNull('total_hours')
+                ->where('time_tracker_id', $checkInId->id)
+                ->first();
+
+                // -------------total time between two Date time with Carbon object
+                $start_time = new Carbon($totalTime->breakin);
+                $end_time = new Carbon($totalTime->breakout);
+                $start_time->format('g:i a');
+                $end_time->format('g:i a');
+                $total_time = $start_time->diffInHours($end_time). ':' .$start_time->diff($end_time)->format('%I:%S');
+
+                $timeEntry->update([
+                    'total_hours' =>  $total_time,
+                ]);
+
+                return redirect('/manager/dashboard')->with('success', 'Break Off time has been submited');
+            }
+    }
+
+    public function checkOutTimeUpdate(Request $request)
+    {
+        $timeEntry = TimeTracker::whereNull('checkout')
+        ->where('employee_id', Auth::user()->employee->id)
+        ->whereDate('date', Carbon::today())
+        ->first();
+
+        if ($timeEntry)
+        {
+            $timeEntry->update([
+                'checkout' =>  new DateTime("now", new DateTimeZone('Asia/Karachi')),
+            ]);
+
+            $totalTime = TimeTracker::select('checkin', 'checkout')->whereNull('total_hours')
+            ->where('employee_id', Auth::user()->employee->id)
+            ->whereDate('date', Carbon::today())
+            ->first();
+
+            // -------------total time between two Date time with Carbon object
+            $start_time = new Carbon($totalTime->checkin);
+            $end_time = new Carbon($totalTime->checkout);
+            $start_time->format('g:i a');
+            $end_time->format('g:i a');
+            $total_time = $start_time->diffInHours($end_time). ':' .$start_time->diff($end_time)->format('%I:%S');
+
+
+            $timeTrackerId = TimeTracker::select('id')->whereNull('break_hours')
+            ->where('employee_id', Auth::user()->employee->id)
+            ->whereDate('date', Carbon::today())
+            ->first();
+
+            $sum_total_hours = TimeBreaker::where(['time_tracker_id' => $timeTrackerId->id, 'employee_id' => Auth::user()->employee->id, 'date' => date('Y-m-d')])
+            ->sum(DB::raw("TIME_TO_SEC(total_hours)"));
+            $sumTime = gmdate("H:i:s", $sum_total_hours);
+
+            $timeEntry->update([
+                'total_hours' =>  $total_time,
+                'break_hours' =>  $sumTime,
+            ]);
+
+            $getWorkingHours = TimeTracker::select('total_hours', 'break_hours')
+            ->where('employee_id', Auth::user()->employee->id)
+            ->where('date', Carbon::today())
+            ->first();
+
+            $totalHours = new Carbon($getWorkingHours->total_hours);
+            $totalBreaks = new Carbon($getWorkingHours->break_hours);
+            $totalHours->format('h:i:s');
+            $totalBreaks->format('h:i:s');
+
+            $workingHours = $totalHours->diffInHours($totalBreaks). ':' .$totalHours->diff($totalBreaks)->format('%I:%S');
+
+            $timeEntry->update([
+                'working_hours' =>  $workingHours,
+            ]);
+
+            return redirect('/manager/dashboard')->with('success', 'CheckOut time has been submited');
+        }
+        else{
+            return redirect('/manager/dashboard')->with('success', 'CheckOut time is missing');
+        }
+
+    }
+
+    public function viewTime($id)
+    {
+        // $viewTimeTracker = TimeTracker::where('employee_id', Auth::user()->employee->id)
+        // ->where('time_tracker_id', $id)->timebreaks;
+        $viewTimeTracker = TimeTracker::find($id)->timebreaks;
+        // ->get();
+        // dd($viewTimeTracker);
+
+        return response()->json($viewTimeTracker);
+        // return view('user_account.dashboard', compact('viewTimeTracker'));
+    }
+
+    public function updateTime(Request $request, $id)
+    {
+        $viewTime = DB::table('time_tracker')
+        ->where('id', $id)
+        ->update([
+            'checkin' => $request->checkin,
+            'checkout' => $request->checkout,
+        ]);
+
+        return response()->json($viewTime);
+    }
+
+}
